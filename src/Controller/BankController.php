@@ -7,10 +7,12 @@ use App\Repository\UserRepository;
 
 use App\Entity\Account;
 use App\Form\AccountType;
+use App\Form\OperationType;
 use App\Repository\AccountRepository;
+use App\Repository\OperationRepository;
 
 use App\Entity\Operation;
-use App\Repository\OperationRepository;
+
 
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 
@@ -20,9 +22,6 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Annotation\Route;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
-use Symfony\Component\HttpFoundation\RedirectResponse;
-use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
-
 /**
  * @IsGranted("IS_AUTHENTICATED_FULLY")
  */
@@ -30,7 +29,6 @@ class BankController extends AbstractController
 {
     //PAGE D'ACCUEIL AVEC LA LISTE DES COMPTES
     #[Route('/', name: 'accountsList')]
-    //#[Route('/account/my_accounts', name: 'accountsList')]
     public function accountsList(): Response
     {
         $accounts = $this->getUser()->getAccounts();
@@ -41,19 +39,14 @@ class BankController extends AbstractController
     
     //PAGE D'AFFICHAGE D'UN SEUL COMPTE
     #[Route('/account/single/{id}', name: 'singleAccount')]
-    public function singleAccount(int $id): Response
+    public function singleAccount(int $id, AccountRepository $accountRepository): Response
     {   
-        $accountRepository = $this->getDoctrine()->getRepository(Account::class);
-        $account = $accountRepository->find($id);
-        // To make sure User can see only his account.
-        if ($account->getUser() === $this->getUser()) {
-            return $this->render('bank/singleAccount.html.twig', [
-                "account" => $account
-            ]);
-        }
-        else {
-            return $this->redirectToRoute('accountsList');
-        }
+        $user = $this->getUser()->getId();
+        //Making sure account data being load is current User's data
+        $account = $accountRepository->findOneBy(array('id' => $id, 'user' => $user));
+        return $this->render('bank/singleAccount.html.twig', [
+            "account" => $account
+        ]);
     }
     
     //PAGE D'AJOUT D'UN NOUVEAU COMPTE
@@ -80,25 +73,77 @@ class BankController extends AbstractController
     #[Route('/account/close_account/{id}', name: 'closeAccountPage', requirements: ['id' => '\d+'])]
     public function closeAccountPage(int $id, AccountRepository $accountRepository ,Request $request): Response
     {
-        $account = $accountRepository->getAccount($id);
-
-        $removeRequest = $this->getDoctrine()->getManager();
+        $user = $this->getUser()->getId();
+        $account = $accountRepository->findOneBy(array('id' => $id, 'user' => $user));
+        
+        if ($account) {
+            $removeRequest = $this->getDoctrine()->getManager();
         $this->addFlash(
             'success',
             "Votre compte a bien été supprimé"
         );
         $removeRequest->remove($account);
         $removeRequest->flush();
-
+        }
+        elseif(!$account) {
+            $this->addFlash(
+                'danger',
+                "N'essayez pas de supprimer les comptes des autres"
+            );
+        }
         return $this->redirectToRoute('accountsList');
     }
 
     //PAGE D'OPERATION DEPOT/RETRAIT
-    #[Route('/operation/deposit_withdrawal', name: 'depositWithdrawalPage')]
-    public function depositWithdrawalPage(): Response
+    #[Route('/operation/deposit_withdrawal/{accountId}/{depotRetrait}', name: 'depositWithdrawalPage', methods: ['GET', 'POST'], requirements: ['accountId' => '\d+', 'depotRetrait' => '\d+'])]
+    public function depositWithdrawalPage(int $accountId ,int $depotRetrait,AccountRepository $accountRepository, OperationRepository $operationRepository, Request $request): Response
     {
-        return $this->render('bank/depositWithdrawalPage.html.twig', [
-        ]);
+        $operation = new Operation();
+        $user = $this->getUser()->getId();
+        $account = $accountRepository->findOneBy(array('id' => $accountId, 'user' => $user));
+        
+        //To make sure that form for deposit/withdrawal only get shown if it's current user's account and prevent abuse
+        if ($account) {
+            $soldeActuel = $account->getAmount();
+            if ($depotRetrait === 1) {
+                $ope = 'credit';   
+            }
+            elseif($depotRetrait === 2){
+                $ope = 'debit';
+            }
+
+            $form = $this->createForm(OperationType::class, $operation);
+            $form->handleRequest($request);
+            if ($form->isSubmitted() && $form->isValid()) {
+            $operation->setOperationType($ope);
+            $operation->setRegistered(new \DateTime());
+            $operation->setAccount($account);
+
+            if ($depotRetrait === 1) {
+                    $newSolde = $soldeActuel + $operation->getOperationAmount();
+                }
+                elseif($depotRetrait === 2){
+                    $newSolde = $soldeActuel - $operation->getOperationAmount();
+                }
+
+                $operation->getAccount()->setAmount($newSolde);
+                $entityManager = $this->getDoctrine()->getManager();
+                $entityManager->persist($operation);
+                $entityManager->flush();
+
+                return $this->redirectToRoute('singleAccount', ['id' => $accountId]); 
+            }
+
+            return $this->render('bank/depositWithdrawalPage.html.twig', [
+                'form' => $form->createView(),
+                'account' => $account,
+                'ope' => $ope,
+            ]);
+        }
+
+        return $this->redirectToRoute('accountsList');
+        
+        
     }
 
     //PAGE D'OPERATION DE TRANSFERT
